@@ -1,0 +1,7 @@
+@import "tailwindcss";
+
+:root {
+  --bg-850: #0f1720;
+}
+
+.bg-gray-850 { background-color: var(--bg-850); }
