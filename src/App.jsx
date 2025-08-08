@@ -97,59 +97,48 @@ export default function App() {
         // fall back to localhost for local dev.
         const backendBase = import.meta.env.VITE_BACKEND_URL || "http://localhost:5000";
 
+        // REPLACE your entire fetch block inside startScan with this one.
         fetch(`${backendBase}/analyze`, {
           method: "POST",
           body: formData,
         })
           .then(async (res) => {
             if (!res.ok) {
-              // Try to extract json error
-              const txt = await res.text();
-              throw new Error(`Server error: ${res.status} — ${txt}`);
+              // If the server returned an error (e.g., 500), this will catch it.
+              const errorText = await res.text();
+              throw new Error(`Server responded with ${res.status}: ${errorText}`);
             }
             return res.json();
           })
           .then((data) => {
-            // Expect { score: number, reason: string }
-            if (typeof data?.score !== "number" || typeof data?.reason !== "string") {
-              // if server returns unexpected format => fallback to deterministic local
-              console.warn("Unexpected server response:", data);
-              // Call backend
-              fetch("http://localhost:5000/analyze", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({
-                  input: mode === "text" ? textInput : imageFile?.name || "image"
-                     })
-              })
-          .then(res => res.json())
-          .then(data => {
-             try { revealAudioRef.current?.play(); } catch (e) {}
-             setResult(data);
-             })
-           .catch(err => {
-               console.error(err);
-               alert("Error analyzing aura");
-               });
-
-              return;
+            // Check if the data from the server has the correct format.
+            if (typeof data?.score !== 'number' || typeof data?.reason !== 'string') {
+              console.warn("Unexpected server response format:", data);
+              throw new Error("Server returned data in an unexpected format.");
             }
 
+            // If everything is good, reveal the result.
             setTimeout(() => {
-              try { revealAudioRef.current?.play(); } catch (e) {}
+              try { revealAudioRef.current?.play(); } catch (e) { }
               setResult({ score: data.score, reason: data.reason });
             }, 350);
           })
           .catch((err) => {
-            console.error("Error fetching aura score:", err);
-            alert("Something went wrong communicating with the server. The UI will show a local fallback.");
-            // Local deterministic fallback so demo still works
+            // This SINGLE .catch block now handles ALL errors:
+            // 1. Network failures (can't connect)
+            // 2. Server errors (like 500 Internal Server Error)
+            // 3. Bad data format errors
+            console.error("An error occurred. Using local fallback.", err);
+            alert("The server couldn't be reached. Displaying a mock result instead.");
+
+            // Run the reliable local fallback logic
             const source = mode === "text" ? textInput : imageFile?.name || "image";
             const score = computeScore(source);
             const reasons = score >= 0 ? positiveReasons : negativeReasons;
             const reason = reasons[Math.abs(score) % reasons.length];
+
             setTimeout(() => {
-              try { revealAudioRef.current?.play(); } catch (e) {}
+              try { revealAudioRef.current?.play(); } catch (e) { }
               setResult({ score, reason });
             }, 350);
           });
@@ -244,7 +233,12 @@ export default function App() {
                   <div className="flex items-center justify-between">
                     <div>
                       <div className="text-sm text-gray-400">Aura Score</div>
-                      <div className="text-5xl font-bold tracking-tight">{displayScore}</div>
+                      {/* --- THIS IS THE CHANGED LINE --- */}
+                      <div className="text-5xl font-bold tracking-tight">
+                        {displayScore >= 0
+                          ? `+${displayScore.toLocaleString()}`
+                          : displayScore.toLocaleString()}
+                      </div>
                     </div>
                     <div className="text-right max-w-xs">
                       <div className="text-sm text-gray-400">Why</div>

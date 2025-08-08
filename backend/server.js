@@ -1,3 +1,4 @@
+// backend/server.js
 import express from "express";
 import multer from "multer";
 import cors from "cors";
@@ -16,44 +17,62 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// ---------- NEW ROUTE: /analyze ----------
 app.post("/analyze", upload.single("image"), async (req, res) => {
   try {
     const text = req.body.text;
-    const imageBuffer = req.file?.buffer;
+    const imageFile = req.file;
 
-    let prompt;
-    if (text) {
-      prompt = `Analyze the following description and give an aura score (-10000 to 10000) and a funny reason: "${text}"`;
-    } else if (imageBuffer) {
-      prompt = `Analyze the aura in this uploaded image and give a score (-10000 to 10000) and a funny reason.`;
+    let userMessages = [];
+
+    // --- FIX 1: Correctly format the message for image uploads ---
+    if (imageFile) {
+      const imageBase64 = imageFile.buffer.toString("base64");
+      userMessages.push({
+        type: "image_url",
+        image_url: {
+          url: `data:${imageFile.mimetype};base64,${imageBase64}`,
+        },
+      });
+      userMessages.push({
+        type: "text",
+        text: "Analyze the aura in this image. Give a score (-10000 to 10000) and a very funny, creative reason.",
+      });
+    } else if (text) {
+      userMessages.push({
+        type: "text",
+        text: `Analyze the following description: "${text}". Give an aura score (-10000 to 10000) and a very funny, creative reason.`,
+      });
     } else {
       return res.status(400).json({ error: "No text or image provided" });
     }
 
-    // Ask AI for JSON response
     const completion = await openai.chat.completions.create({
       model: "gpt-4o-mini",
+      // --- FIX 2: Enable guaranteed JSON output from the AI ---
+      response_format: { type: "json_object" },
       messages: [
         {
           role: "system",
-          content: "You are an aura meter. Reply in JSON: { score: number, reason: string }",
+          content: "You are a witty, sarcastic aura reader. Your job is to analyze text or images and provide a score and a funny reason. Always respond in a valid JSON object format: { \"score\": number, \"reason\": string }.",
         },
-        { role: "user", content: prompt },
+        {
+          role: "user",
+          content: userMessages,
+        },
       ],
     });
 
     const responseText = completion.choices[0].message.content;
-    const parsed = JSON.parse(responseText);
+    const parsedJson = JSON.parse(responseText);
 
-    res.json(parsed);
+    res.json(parsedJson);
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Failed to analyze aura" });
+    console.error("Error in OpenAI call:", err);
+    res.status(500).json({ error: "Failed to analyze aura due to an internal error." });
   }
 });
-// -----------------------------------------
 
-app.listen(5000, () => {
-  console.log("Backend running on http://localhost:5000");
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => {
+  console.log(`Backend running on http://localhost:${PORT}`);
 });
