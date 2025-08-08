@@ -1,19 +1,16 @@
 import { useState, useEffect, useRef } from "react";
 
-/**
- * Simple deterministic "score" function so same input → same result
- * (no backend required yet).
- */
+/** (Keep your old computeScore only for a local fallback if needed) */
 function computeScore(input) {
   if (!input) return 0;
   let sum = 0;
   for (let i = 0; i < input.length; i++) {
     sum += input.charCodeAt(i);
   }
-  // range -10000 .. +10000
   return (sum % 20001) - 10000;
 }
 
+/* --- same reasons — you can keep these if you want a local fallback --- */
 const positiveReasons = [
   "Cosmic vibes aligned — your aura's on a coffee break with destiny.",
   "Radiant charm: you accidentally made someone’s day better.",
@@ -26,7 +23,7 @@ const negativeReasons = [
 ];
 
 export default function App() {
-  const [mode, setMode] = useState("text"); // "text" or "image"
+  const [mode, setMode] = useState("text");
   const [textInput, setTextInput] = useState("");
   const [imageFile, setImageFile] = useState(null);
   const [scanning, setScanning] = useState(false);
@@ -37,16 +34,17 @@ export default function App() {
   const revealAudioRef = useRef(null);
 
   useEffect(() => {
-    // preload audio (place files in /public/sounds/)
     scanAudioRef.current = new Audio("/sounds/scan.mp3");
     revealAudioRef.current = new Audio("/sounds/reveal.mp3");
+    // Preload audio so play() later is more likely to succeed without user gesture
+    scanAudioRef.current.load?.();
+    revealAudioRef.current.load?.();
   }, []);
 
   useEffect(() => {
     if (!result) return;
-    // animated count to result.score
     const target = result.score;
-    const duration = 800; // ms
+    const duration = 800;
     const fps = 60;
     const frames = Math.round((duration / 1000) * fps);
     let frame = 0;
@@ -55,8 +53,7 @@ export default function App() {
     const id = setInterval(() => {
       frame++;
       const t = frame / frames;
-      // easeOutQuad
-      const eased = 1 - (1 - t) * (1 - t);
+      const eased = 1 - (1 - t) * (1 - t); // easeOutQuad
       setDisplayScore(Math.round(start + diff * eased));
       if (frame >= frames) clearInterval(id);
     }, 1000 / fps);
@@ -70,37 +67,92 @@ export default function App() {
       return;
     }
 
-    // play scanning audio
     try { scanAudioRef.current?.play(); } catch (e) { /* ignore autoplay errors */ }
 
     setResult(null);
     setScanning(true);
     setProgress(0);
 
-    // Fake scanning progress
-    const total = 2200 + Math.random() * 1600; // total ms
+    // Fake scanning progress (same feel as before)
+    const total = 2200 + Math.random() * 1600;
     const start = Date.now();
     const tick = setInterval(() => {
       const elapsed = Date.now() - start;
       const p = Math.min(100, Math.floor((elapsed / total) * 100));
       setProgress(p);
+
       if (p >= 100) {
         clearInterval(tick);
         setScanning(false);
 
-        // compute deterministic score (for now)
-        const source = mode === "text" ? textInput : imageFile?.name || "image";
-        const score = computeScore(source);
+        // Build FormData and call backend
+        const formData = new FormData();
+        if (mode === "text") {
+          formData.append("text", textInput.trim());
+        } else if (imageFile) {
+          formData.append("image", imageFile);
+        }
 
-        // choose reason deterministically
-        const reasons = score >= 0 ? positiveReasons : negativeReasons;
-        const reason = reasons[Math.abs(score) % reasons.length];
+        // Use a configurable backend base URL if you want (env var at build time),
+        // fall back to localhost for local dev.
+        const backendBase = import.meta.env.VITE_BACKEND_URL || "http://localhost:5000";
 
-        // small delay for dramatic reveal
-        setTimeout(() => {
-          try { revealAudioRef.current?.play(); } catch (e) {}
-          setResult({ score, reason });
-        }, 350);
+        fetch(`${backendBase}/analyze`, {
+          method: "POST",
+          body: formData,
+        })
+          .then(async (res) => {
+            if (!res.ok) {
+              // Try to extract json error
+              const txt = await res.text();
+              throw new Error(`Server error: ${res.status} — ${txt}`);
+            }
+            return res.json();
+          })
+          .then((data) => {
+            // Expect { score: number, reason: string }
+            if (typeof data?.score !== "number" || typeof data?.reason !== "string") {
+              // if server returns unexpected format => fallback to deterministic local
+              console.warn("Unexpected server response:", data);
+              // Call backend
+              fetch("http://localhost:5000/analyze", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({
+                  input: mode === "text" ? textInput : imageFile?.name || "image"
+                     })
+              })
+          .then(res => res.json())
+          .then(data => {
+             try { revealAudioRef.current?.play(); } catch (e) {}
+             setResult(data);
+             })
+           .catch(err => {
+               console.error(err);
+               alert("Error analyzing aura");
+               });
+
+              return;
+            }
+
+            setTimeout(() => {
+              try { revealAudioRef.current?.play(); } catch (e) {}
+              setResult({ score: data.score, reason: data.reason });
+            }, 350);
+          })
+          .catch((err) => {
+            console.error("Error fetching aura score:", err);
+            alert("Something went wrong communicating with the server. The UI will show a local fallback.");
+            // Local deterministic fallback so demo still works
+            const source = mode === "text" ? textInput : imageFile?.name || "image";
+            const score = computeScore(source);
+            const reasons = score >= 0 ? positiveReasons : negativeReasons;
+            const reason = reasons[Math.abs(score) % reasons.length];
+            setTimeout(() => {
+              try { revealAudioRef.current?.play(); } catch (e) {}
+              setResult({ score, reason });
+            }, 350);
+          });
       }
     }, 60);
   };
@@ -165,10 +217,8 @@ export default function App() {
             </button>
           </div>
 
-          {/* scanning visual */}
           <div className="mt-6">
             <div className="relative bg-gray-900 rounded-xl p-6 overflow-hidden">
-              {/* fake scanner beam */}
               <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
                 <div className={`scanner-overlay ${scanning ? "active" : ""}`} />
               </div>
@@ -185,12 +235,10 @@ export default function App() {
                 </div>
               </div>
 
-              {/* progress bar */}
               <div className="mt-4 bg-gray-800 h-2 rounded-full overflow-hidden">
                 <div className="h-2 rounded-full bg-gradient-to-r from-pink-500 to-yellow-400" style={{ width: `${progress}%`, transition: "width 120ms linear" }} />
               </div>
 
-              {/* result card */}
               {result && (
                 <div className="mt-6 bg-gradient-to-r from-slate-800 to-slate-900 p-5 rounded-xl border border-gray-700 shadow-inner">
                   <div className="flex items-center justify-between">
@@ -209,7 +257,7 @@ export default function App() {
           </div>
 
           <footer className="mt-4 text-xs text-gray-400">
-            (This frontend is a mock scanner for UI/demo — we'll replace scoring logic with the OpenAI backend later.)
+            (This frontend expects a backend `/analyze` endpoint — a deterministic local fallback will be used if the server fails.)
           </footer>
         </main>
       </div>
