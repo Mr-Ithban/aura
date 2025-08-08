@@ -1,16 +1,26 @@
 import { useState, useEffect, useRef } from "react";
+import {
+  collection,
+  doc,
+  setDoc,
+  getDoc,
+  serverTimestamp,
+  query,
+  orderBy,
+  limit,
+  getDocs
+} from "firebase/firestore";
+import { db } from "./firebase";
 
-/** (Keep your old computeScore only for a local fallback if needed) */
 function computeScore(input) {
   if (!input) return 0;
   let sum = 0;
   for (let i = 0; i < input.length; i++) {
     sum += input.charCodeAt(i);
   }
-  return (sum % 20001) - 10000;
+  return (sum % 20001) - 10000; // Range: -10000 to 10000 (no clamp afterward)
 }
 
-/* --- same reasons — you can keep these if you want a local fallback --- */
 const positiveReasons = [
   "Cosmic vibes aligned — your aura's on a coffee break with destiny.",
   "Radiant charm: you accidentally made someone’s day better.",
@@ -23,20 +33,21 @@ const negativeReasons = [
 ];
 
 export default function App() {
+  const [username, setUsername] = useState("");
   const [mode, setMode] = useState("text");
   const [textInput, setTextInput] = useState("");
   const [imageFile, setImageFile] = useState(null);
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [result, setResult] = useState(null); // { score, reason }
+  const [result, setResult] = useState(null);
   const [displayScore, setDisplayScore] = useState(0);
+  const [leaderboard, setLeaderboard] = useState([]);
   const scanAudioRef = useRef(null);
   const revealAudioRef = useRef(null);
 
   useEffect(() => {
     scanAudioRef.current = new Audio("/sounds/scan.mp3");
     revealAudioRef.current = new Audio("/sounds/reveal.mp3");
-    // Preload audio so play() later is more likely to succeed without user gesture
     scanAudioRef.current.load?.();
     revealAudioRef.current.load?.();
   }, []);
@@ -53,233 +64,261 @@ export default function App() {
     const id = setInterval(() => {
       frame++;
       const t = frame / frames;
-      const eased = 1 - (1 - t) * (1 - t); // easeOutQuad
+      const eased = 1 - (1 - t) * (1 - t);
       setDisplayScore(Math.round(start + diff * eased));
       if (frame >= frames) clearInterval(id);
     }, 1000 / fps);
     return () => clearInterval(id);
   }, [result]);
 
+  const saveToLeaderboard = async (score, reason) => {
+    if (!username.trim()) {
+      alert("Please enter a username first!");
+      return;
+    }
+
+    try {
+      const userRef = doc(db, "leaderboard", username.trim().toLowerCase());
+      const existing = await getDoc(userRef);
+
+      const numericScore = Number(score) || 0;
+
+      if (existing.exists()) {
+        const prevScore = Number(existing.data().score) || 0;
+        const newScore = prevScore + numericScore; // No clamp, can go ±∞
+        await setDoc(userRef, {
+          username: username.trim(),
+          score: newScore,
+          reason,
+          timestamp: serverTimestamp()
+        });
+      } else {
+        await setDoc(userRef, {
+          username: username.trim(),
+          score: numericScore,
+          reason,
+          timestamp: serverTimestamp()
+        });
+      }
+      fetchLeaderboard();
+    } catch (err) {
+      console.error("Error saving to leaderboard:", err);
+    }
+  };
+
+  const fetchLeaderboard = async () => {
+    try {
+      const q = query(
+        collection(db, "leaderboard"),
+        orderBy("score", "desc"),
+        limit(5)
+      );
+      const snapshot = await getDocs(q);
+      const data = snapshot.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+      setLeaderboard(data);
+    } catch (err) {
+      console.error("Error fetching leaderboard:", err);
+    }
+  };
+
+  useEffect(() => {
+    fetchLeaderboard();
+  }, []);
+
   const startScan = () => {
+    if (!username.trim()) {
+      alert("Please enter your name before scanning.");
+      return;
+    }
+
     const input = mode === "text" ? textInput.trim() : imageFile;
     if (!input) {
       alert("Please enter text or upload an image to scan.");
       return;
     }
 
-    try { scanAudioRef.current?.play(); } catch (e) { /* ignore autoplay errors */ }
-
+    try {
+      scanAudioRef.current?.play();
+    } catch {}
     setResult(null);
     setScanning(true);
     setProgress(0);
 
-    // Fake scanning progress (same feel as before)
-    const total = 2200 + Math.random() * 1600;
-    const start = Date.now();
-    const tick = setInterval(() => {
-      const elapsed = Date.now() - start;
-      const p = Math.min(100, Math.floor((elapsed / total) * 100));
-      setProgress(p);
-
-      if (p >= 100) {
-        clearInterval(tick);
-        setScanning(false);
-
-        // Build FormData and call backend
-        const formData = new FormData();
-        if (mode === "text") {
-          formData.append("text", textInput.trim());
-        } else if (imageFile) {
-          formData.append("image", imageFile);
+    const animationPromise = new Promise((resolve) => {
+      const total = 2200 + Math.random() * 1600;
+      const start = Date.now();
+      const tick = setInterval(() => {
+        const elapsed = Date.now() - start;
+        const p = Math.min(100, Math.floor((elapsed / total) * 100));
+        setProgress(p);
+        if (p >= 100) {
+          clearInterval(tick);
+          resolve();
         }
+      }, 60);
+    });
 
-        // Use a configurable backend base URL if you want (env var at build time),
-        // fall back to localhost for local dev.
-        const backendBase = import.meta.env.VITE_BACKEND_URL || "http://localhost:5000";
-
-        // REPLACE your entire fetch block inside startScan with this one.
-        fetch(`${backendBase}/analyze`, {
-          method: "POST",
-          body: formData,
-        })
-          .then(async (res) => {
-            if (!res.ok) {
-              // If the server returned an error (e.g., 500), this will catch it.
-              const errorText = await res.text();
-              throw new Error(`Server responded with ${res.status}: ${errorText}`);
-            }
-            return res.json();
-          })
-          .then((data) => {
-            // Check if the data from the server has the correct format.
-            if (typeof data?.score !== 'number' || typeof data?.reason !== 'string') {
-              console.warn("Unexpected server response format:", data);
-              throw new Error("Server returned data in an unexpected format.");
-            }
-
-            // If everything is good, reveal the result.
-            setTimeout(() => {
-              try { revealAudioRef.current?.play(); } catch (e) { }
-              setResult({ score: data.score, reason: data.reason });
-            }, 350);
-          })
-          .catch((err) => {
-            // This SINGLE .catch block now handles ALL errors:
-            // 1. Network failures (can't connect)
-            // 2. Server errors (like 500 Internal Server Error)
-            // 3. Bad data format errors
-            console.error("An error occurred. Using local fallback.", err);
-            alert("The server couldn't be reached. Displaying a mock result instead.");
-
-            // Run the reliable local fallback logic
-            const source = mode === "text" ? textInput : imageFile?.name || "image";
-            const score = computeScore(source);
-            const reasons = score >= 0 ? positiveReasons : negativeReasons;
-            const reason = reasons[Math.abs(score) % reasons.length];
-
-            setTimeout(() => {
-              try { revealAudioRef.current?.play(); } catch (e) { }
-              setResult({ score, reason });
-            }, 350);
-          });
+    const apiPromise = new Promise((resolve) => {
+      const formData = new FormData();
+      if (mode === "text") {
+        formData.append("text", textInput.trim());
+      } else if (imageFile) {
+        formData.append("image", imageFile);
       }
-    }, 60);
+
+      const backendBase =
+        import.meta.env.VITE_BACKEND_URL || "http://localhost:5000";
+
+      fetch(`${backendBase}/analyze`, {
+        method: "POST",
+        body: formData
+      })
+        .then(async (res) => {
+          if (!res.ok) {
+            const errorText = await res.text();
+            throw new Error(
+              `Server responded with ${res.status}: ${errorText}`
+            );
+          }
+          return res.json();
+        })
+        .then((data) => {
+          if (
+            typeof data?.score !== "number" ||
+            typeof data?.reason !== "string"
+          ) {
+            throw new Error("Unexpected response format");
+          }
+          resolve({ score: Number(data.score), reason: data.reason });
+        })
+        .catch(() => {
+          const source = mode === "text" ? textInput : imageFile?.name || "image";
+          const score = computeScore(source);
+          const reasons =
+            score >= 0 ? positiveReasons : negativeReasons;
+          const reason =
+            reasons[Math.abs(score) % reasons.length];
+          resolve({ score: Number(score), reason });
+        });
+    });
+
+    Promise.all([animationPromise, apiPromise]).then(([_, apiResult]) => {
+      setScanning(false);
+      try {
+        revealAudioRef.current?.play();
+      } catch {}
+      setResult(apiResult);
+      saveToLeaderboard(apiResult.score, apiResult.reason);
+    });
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-slate-900 via-slate-900 to-slate-800 text-white flex items-center justify-center p-6">
-      <div className="w-full max-w-3xl">
-        <header className="mb-8 text-center">
-          <h1 className="text-5xl font-extrabold tracking-tight">Aura Meter</h1>
-          <p className="text-gray-300 mt-2">Upload an image or type a moment — we'll pretend to read the cosmos.</p>
-        </header>
+    <div className="min-h-screen bg-gradient-to-b from-indigo-900 via-purple-900 to-black flex flex-col items-center p-6 text-white">
+      <h1 className="text-4xl font-bold mb-6">Aura Meter 🔮</h1>
 
-        <main className="bg-gray-850 p-6 rounded-2xl shadow-2xl">
-          <div className="flex gap-2 mb-4">
-            <button
-              onClick={() => setMode("text")}
-              className={`flex-1 p-2 rounded ${mode === "text" ? "bg-blue-500" : "bg-gray-700"}`}
-            >
-              Text
-            </button>
-            <button
-              onClick={() => setMode("image")}
-              className={`flex-1 p-2 rounded ${mode === "image" ? "bg-blue-500" : "bg-gray-700"}`}
-            >
-              Image
-            </button>
-          </div>
+      {/* Username Input */}
+      <input
+        type="text"
+        placeholder="Enter your name..."
+        value={username}
+        onChange={(e) => setUsername(e.target.value)}
+        className="w-72 p-3 rounded-lg text-black border border-gray-300 focus:outline-none focus:ring-2 focus:ring-purple-500 mb-4"
+      />
 
-          {mode === "text" ? (
-            <textarea
-              value={textInput}
-              onChange={(e) => setTextInput(e.target.value)}
-              className="w-full p-4 rounded-lg bg-gray-800 border border-gray-700 resize-none h-36 focus:outline-none"
-              placeholder="Describe the moment... (funny, weird, or serious — the aura doesn't judge)"
-            />
-          ) : (
-            <div className="w-full p-4 rounded-lg bg-gray-800 border border-gray-700 flex flex-col items-center gap-3">
-              <input
-                type="file"
-                accept="image/*"
-                onChange={(e) => setImageFile(e.target.files?.[0] || null)}
-                className="text-sm w-full"
-              />
-              {imageFile && <div className="text-sm text-gray-300">Selected: {imageFile.name}</div>}
-            </div>
-          )}
-
-          <div className="mt-4 flex gap-3">
-            <button
-              onClick={startScan}
-              disabled={scanning}
-              className={`flex-1 p-3 rounded-lg font-semibold ${scanning ? "bg-gray-600" : "bg-gradient-to-r from-purple-500 to-indigo-500"}`}
-            >
-              {scanning ? "Scanning..." : "Scan Aura"}
-            </button>
-
-            <button
-              onClick={() => { setTextInput(""); setImageFile(null); setResult(null); setDisplayScore(0); }}
-              className="p-3 rounded-lg bg-gray-700"
-            >
-              Reset
-            </button>
-          </div>
-
-          <div className="mt-6">
-            <div className="relative bg-gray-900 rounded-xl p-6 overflow-hidden">
-              <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-                <div className={`scanner-overlay ${scanning ? "active" : ""}`} />
-              </div>
-
-              <div className="flex items-center justify-between">
-                <div>
-                  <div className="text-sm text-gray-400">Status</div>
-                  <div className="text-lg font-semibold">{scanning ? "Analyzing cosmic wavelengths..." : result ? "Ready" : "Idle"}</div>
-                </div>
-
-                <div className="w-48 text-right">
-                  <div className="text-sm text-gray-400">Progress</div>
-                  <div className="font-mono text-2xl">{progress}%</div>
-                </div>
-              </div>
-
-              <div className="mt-4 bg-gray-800 h-2 rounded-full overflow-hidden">
-                <div className="h-2 rounded-full bg-gradient-to-r from-pink-500 to-yellow-400" style={{ width: `${progress}%`, transition: "width 120ms linear" }} />
-              </div>
-
-              {result && (
-                <div className="mt-6 bg-gradient-to-r from-slate-800 to-slate-900 p-5 rounded-xl border border-gray-700 shadow-inner">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <div className="text-sm text-gray-400">Aura Score</div>
-                      {/* --- THIS IS THE CHANGED LINE --- */}
-                      <div className="text-5xl font-bold tracking-tight">
-                        {displayScore >= 0
-                          ? `+${displayScore.toLocaleString()}`
-                          : displayScore.toLocaleString()}
-                      </div>
-                    </div>
-                    <div className="text-right max-w-xs">
-                      <div className="text-sm text-gray-400">Why</div>
-                      <div className="mt-2">{result.reason}</div>
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-          </div>
-
-          <footer className="mt-4 text-xs text-gray-400">
-            (This frontend expects a backend `/analyze` endpoint — a deterministic local fallback will be used if the server fails.)
-          </footer>
-        </main>
+      {/* Mode Buttons */}
+      <div className="flex gap-4 mb-6">
+        <button
+          onClick={() => setMode("text")}
+          className={`px-4 py-2 rounded-lg font-semibold transition ${
+            mode === "text"
+              ? "bg-purple-600"
+              : "bg-gray-700 hover:bg-gray-600"
+          }`}
+        >
+          Text Mode
+        </button>
+        <button
+          onClick={() => setMode("image")}
+          className={`px-4 py-2 rounded-lg font-semibold transition ${
+            mode === "image"
+              ? "bg-purple-600"
+              : "bg-gray-700 hover:bg-gray-600"
+          }`}
+        >
+          Image Mode
+        </button>
       </div>
 
-      <style jsx>{`
-        .scanner-overlay {
-          width: 70%;
-          height: 40%;
-          border-radius: 12px;
-          background: linear-gradient(90deg, rgba(255,255,255,0.02) 0%, rgba(255,255,255,0.06) 50%, rgba(255,255,255,0.02) 100%);
-          transform: translateY(-120%);
-          opacity: 0;
-          transition: transform 1.1s ease, opacity 0.6s ease;
-          box-shadow: 0 0 40px rgba(125, 70, 255, 0.06), 0 0 120px rgba(255, 100, 180, 0.02);
-        }
-        .scanner-overlay.active {
-          transform: translateY(0%);
-          opacity: 1;
-          animation: sweep 1.2s linear infinite;
-        }
-        @keyframes sweep {
-          0% { transform: translateY(-120%); opacity: 0; }
-          10% { opacity: 1; }
-          50% { transform: translateY(0%); opacity: 1; }
-          90% { opacity: 1; }
-          100% { transform: translateY(120%); opacity: 0; }
-        }
-      `}</style>
+      {/* Input */}
+      {mode === "text" ? (
+        <input
+          type="text"
+          placeholder="Enter text..."
+          value={textInput}
+          onChange={(e) => setTextInput(e.target.value)}
+          className="w-72 p-3 rounded-lg text-black border border-gray-300 focus:outline-none focus:ring-2 focus:ring-purple-500 mb-4"
+        />
+      ) : (
+        <input
+          type="file"
+          accept="image/*"
+          onChange={(e) => setImageFile(e.target.files[0])}
+          className="mb-4"
+        />
+      )}
+
+      {/* Scan Button */}
+      <button
+        onClick={startScan}
+        disabled={scanning}
+        className={`px-6 py-3 rounded-lg font-bold text-lg transition ${
+          scanning
+            ? "bg-gray-500"
+            : "bg-green-500 hover:bg-green-600"
+        }`}
+      >
+        {scanning ? "Scanning..." : "Scan Aura"}
+      </button>
+
+      {/* Progress */}
+      {scanning && (
+        <div className="mt-4 w-72 bg-gray-800 rounded-full overflow-hidden">
+          <div
+            className="bg-purple-500 h-3 transition-all"
+            style={{ width: `${progress}%` }}
+          ></div>
+        </div>
+      )}
+
+      {/* Result */}
+      {result && (
+        <div className="mt-8 p-6 bg-gray-900 rounded-xl shadow-lg text-center max-w-md">
+          <h2 className="text-2xl font-bold">Score: {displayScore}</h2>
+          <p className="mt-2 text-gray-300">{result.reason}</p>
+        </div>
+      )}
+
+      {/* Leaderboard */}
+      <div className="mt-10 w-full max-w-lg bg-gray-900 p-6 rounded-xl shadow-lg">
+        <h3 className="text-xl font-bold mb-4">🏆 Leaderboard</h3>
+        {leaderboard.length > 0 ? (
+          <ol className="space-y-2">
+            {leaderboard.map((entry, i) => (
+              <li
+                key={entry.id}
+                className="flex justify-between items-center bg-gray-800 px-4 py-2 rounded-lg"
+              >
+                <span className="font-semibold">
+                  {i + 1}. {entry.username}
+                </span>
+                <span className="text-green-400">{entry.score}</span>
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <p className="text-gray-400">No scores yet!</p>
+        )}
+      </div>
     </div>
   );
 }
