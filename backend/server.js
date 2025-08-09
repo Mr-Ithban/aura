@@ -2,10 +2,7 @@
 import express from "express";
 import multer from "multer";
 import cors from "cors";
-import OpenAI from "openai";
-import dotenv from "dotenv";
-
-dotenv.config();
+import fetch from "node-fetch"; // Use node-fetch for backend requests
 
 const app = express();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -13,82 +10,91 @@ const upload = multer({ storage: multer.memoryStorage() });
 app.use(cors());
 app.use(express.json());
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+// This is a placeholder for the Gemini API Key.
+// In a production environment, this should be handled securely.
+const apiKey = ""; // Per instructions, leave this empty.
 
 app.post("/analyze", upload.single("image"), async (req, res) => {
   try {
     const text = req.body.text;
     const imageFile = req.file;
 
-    let userContent = "";
+    const prompt = `You are a fun, casual aura reader who gives short, humorous, and witty remarks about a person's aura. Analyze the input and respond ONLY in JSON with two keys:
+- "score": a number from -10000 to 10000 (negative means aura minus, positive means aura plus)
+- "reason": a short, jokey explanation for the score that sounds like a playful 'aura plus' or 'aura minus' moment.
+
+Examples of "reason":
+- "Aura plus! You’re radiating good vibes like a caffeinated puppy."
+- "Aura minus. Looks like your aura forgot to set its alarm today."
+- "Major aura plus — your energy just won the cosmic lottery."
+- "Aura minus detected: did you spill coffee on your vibe?"
+
+Keep the reason short (under 100 characters), funny, and casual.`;
+
+    let parts = [{ text: prompt }];
 
     if (imageFile) {
       const imageBase64 = imageFile.buffer.toString("base64");
-      const imageDataUri = `data:${imageFile.mimetype};base64,${imageBase64}`;
-      userContent = `Analyze the aura in this image: ${imageDataUri}. You are a fun, casual aura reader who gives short, humorous, and witty remarks about a person's aura. 
-
-Analyze the input (text or image) and respond ONLY in JSON with two keys:
-
-- "score": a number from -10000 to 10000 (negative means aura minus, positive means aura plus)
-- "reason": a short, jokey explanation of the aura that sounds like a playful aura plus/minus moment
-
-Examples of "reason":
-- "Aura plus! You’re radiating good vibes like a caffeinated puppy."
-- "Aura minus. Looks like your aura forgot to set its alarm today."
-- "Major aura plus — your energy just won the cosmic lottery."
-- "Aura minus detected: did you spill coffee on your vibe?"
-
-Keep the reason short (under 100 characters), funny, and casual.`;
+      parts.push({
+        inlineData: {
+          mimeType: imageFile.mimetype,
+          data: imageBase64,
+        },
+      });
     } else if (text) {
-      userContent = `Analyze the following description: "${text}". You are a fun, casual aura reader who gives short, humorous, and witty remarks about a person's aura. 
-
-Analyze the input (text or image) and respond ONLY in JSON with two keys:
-
-- "score": a number from -10000 to 10000 (negative means aura minus, positive means aura plus)
-- "reason": a short, jokey explanation of the aura that sounds like a playful aura plus/minus moment
-
-Examples of "reason":
-- "Aura plus! You’re radiating good vibes like a caffeinated puppy."
-- "Aura minus. Looks like your aura forgot to set its alarm today."
-- "Major aura plus — your energy just won the cosmic lottery."
-- "Aura minus detected: did you spill coffee on your vibe?"
-
-Keep the reason short (under 100 characters), funny, and casual.`;
+      // Prepend the text to be analyzed to the parts array
+      parts.unshift({ text: `Analyze the following description: "${text}".` });
     } else {
       return res.status(400).json({ error: "No text or image provided" });
     }
 
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content:
-            "You are a witty, sarcastic aura reader. Your job is to analyze text or images and provide a score and a funny reason. Always respond in a valid JSON object format: { \"score\": number, \"reason\": string }.",
+    const payload = {
+      contents: [{ parts: parts }],
+      generationConfig: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: "OBJECT",
+          properties: {
+            score: { type: "NUMBER" },
+            reason: { type: "STRING" },
+          },
+          required: ["score", "reason"],
         },
-        {
-          role: "user",
-          content: userContent,
-        },
-      ],
+      },
+    };
+
+    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`;
+
+    const apiResponse = await fetch(apiUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
     });
 
-    const responseText = completion.choices[0].message.content;
-
-    // Sometimes AI might not return perfectly parseable JSON, so catch errors:
-    let parsedJson;
-    try {
-      parsedJson = JSON.parse(responseText);
-    } catch (e) {
-      return res.status(500).json({ error: "Failed to parse AI response." });
+    if (!apiResponse.ok) {
+        const errorBody = await apiResponse.text();
+        console.error("Gemini API Error:", errorBody);
+        throw new Error(`API call failed with status: ${apiResponse.status}`);
     }
 
-    res.json(parsedJson);
+    const result = await apiResponse.json();
+    
+    if (result.candidates && result.candidates.length > 0 &&
+        result.candidates[0].content && result.candidates[0].content.parts &&
+        result.candidates[0].content.parts.length > 0) {
+        
+        const responseText = result.candidates[0].content.parts[0].text;
+        const parsedJson = JSON.parse(responseText);
+        res.json(parsedJson);
+
+    } else {
+        // Handle cases where the response structure is unexpected
+        console.error("Unexpected Gemini API response structure:", result);
+        throw new Error("Failed to get a valid response from the AI.");
+    }
+
   } catch (err) {
-    console.error("Error in OpenAI call:", err);
+    console.error("Error in /analyze endpoint:", err);
     res
       .status(500)
       .json({ error: "Failed to analyze aura due to an internal error." });

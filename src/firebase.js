@@ -5,7 +5,7 @@ import { getFirestore } from "firebase/firestore"; // ✅ Firestore import
 
 // Your web app's Firebase configuration
 const firebaseConfig = {
-  apiKey: "OPENAI_API_KEY",
+  apiKey: "AIzaSyC9Th_FHov-avJUlrol5bEMCmReGV4jUlI",
   authDomain: "aura-ba72b.firebaseapp.com",
   projectId: "aura-ba72b",
   storageBucket: "aura-ba72b.firebasestorage.app",
